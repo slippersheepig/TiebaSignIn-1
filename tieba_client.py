@@ -3,6 +3,7 @@ import logging
 import random
 import time
 from typing import Optional
+from urllib.parse import quote
 
 import requests
 
@@ -13,6 +14,7 @@ SIGN_KEY = "tiebaclient!!!"
 TBS_URL = "https://tieba.baidu.com/dc/common/tbs"
 LIKE_URL = "https://c.tieba.baidu.com/c/f/forum/like"
 SIGN_URL = "https://c.tieba.baidu.com/c/c/forum/sign"
+WEB_SIGN_URL = "https://tieba.baidu.com/sign/add"
 
 HEADERS = {
     "User-Agent": (
@@ -37,10 +39,11 @@ class TiebaClient:
     百度贴吧签到客户端
     """
 
-    def __init__(self, bduss: str) -> None:
+    def __init__(self, bduss: str, stoken: Optional[str] = None) -> None:
         if not bduss:
             raise ValueError("BDUSS 不能为空")
         self.bduss = bduss
+        self.stoken = stoken
         self._session: Optional[requests.Session] = None
 
     # -- session 惰性初始化 --
@@ -67,14 +70,15 @@ class TiebaClient:
         url: str,
         method: str = "get",
         data: Optional[dict] = None,
+        headers: Optional[dict] = None,
         retry: int = 3,
     ) -> Optional[dict]:
         for i in range(retry):
             try:
                 if method.lower() == "get":
-                    resp = self.session.get(url, timeout=10)
+                    resp = self.session.get(url, headers=headers, timeout=10)
                 else:
-                    resp = self.session.post(url, data=data, timeout=10)
+                    resp = self.session.post(url, data=data, headers=headers, timeout=10)
 
                 resp.raise_for_status()
                 if not resp.text.strip():
@@ -182,3 +186,50 @@ class TiebaClient:
             return {"status": "shield", "rank": None, "message": "贴吧已被屏蔽"}
         else:
             return {"status": "error", "rank": None, "message": error_msg or "未知错误"}
+
+    # -- Web 端签到兜底（需要 STOKEN） --
+    def sign_forum_web(self, name: str, tbs: str) -> dict:
+        """客户端接口返回 340006 时，使用网页版接口再尝试一次。"""
+        if not self.stoken:
+            return {
+                "status": "error",
+                "rank": None,
+                "message": "缺少 STOKEN，无法使用 Web 端签到兜底",
+            }
+
+        data = {
+            "ie": "utf-8",
+            "kw": name,
+            "tbs": tbs,
+        }
+        headers = {
+            "Referer": f"https://tieba.baidu.com/f?kw={quote(name)}&fr=home",
+            "X-Requested-With": "XMLHttpRequest",
+            "Cookie": f"BDUSS={self.bduss}; STOKEN={self.stoken}",
+        }
+
+        result = self._request(WEB_SIGN_URL, "post", data, headers=headers)
+        if result is None:
+            return {
+                "status": "error",
+                "rank": None,
+                "message": "Web 端签到请求失败",
+            }
+
+        no = result.get("no")
+        try:
+            no = int(no) if no is not None else -1
+        except (TypeError, ValueError):
+            no = -1
+
+        error = result.get("error", "")
+        if no == 0:
+            return {"status": "success", "rank": None, "message": "签到成功（Web 端）"}
+        if no == 1101:
+            return {"status": "exist", "rank": None, "message": error or "今日已签到（Web 端）"}
+
+        return {
+            "status": "error",
+            "rank": None,
+            "message": error or f"Web 端签到失败，错误码 {no}",
+        }
