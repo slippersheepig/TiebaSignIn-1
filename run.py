@@ -66,7 +66,8 @@ def sign_round(
             logger.info(f"〖{fname}〗旧客户端接口返回 340006，尝试新版客户端签到...")
             fresh_tbs = client.get_tbs() or tbs
             time.sleep(2)
-            result = client.sign_forum_modern(fname, fresh_tbs)
+            result = client.sign_forum_modern(fid, fname, fresh_tbs)
+            fname = result.get("forum_name") or fname
 
         status = result["status"]
         stats[status] += 1
