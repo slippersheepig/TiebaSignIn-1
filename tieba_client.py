@@ -15,9 +15,9 @@ TBS_URL = "https://tieba.baidu.com/dc/common/tbs"
 LIKE_URL = "https://c.tieba.baidu.com/c/f/forum/like"
 SIGN_URL = "https://c.tieba.baidu.com/c/c/forum/sign"
 MODERN_SIGN_URL = "https://tiebac.baidu.com/c/c/forum/sign"
-MODERN_CLIENT_VERSION = "12.64.1.1"
+MODERN_CLIENT_VERSION = "22.6.5.1"
+PC_FORUM_CARD_URL = "https://tieba.baidu.com/c/f/pc/forumCard"
 PC_SIGN_KEY = "36770b1f34c9bbbf2e7d1a99d2b82fa9e"
-FORUM_CARD_URL = "https://tieba.baidu.com/c/f/pc/forumCard"
 WEB_SIGN_URL = "https://tieba.baidu.com/sign/add"
 
 HEADERS = {
@@ -67,9 +67,9 @@ class TiebaClient:
 
     # -- 签名算法 --
     @staticmethod
-    def signature(data: dict, salt: str = SIGN_KEY) -> str:
+    def signature(data: dict) -> str:
         s = "".join(f"{k}={data[k]}" for k in sorted(data))
-        return hashlib.md5((s + salt).encode()).hexdigest().upper()
+        return hashlib.md5((s + SIGN_KEY).encode()).hexdigest().upper()
 
     # -- 带指数退避的请求 --
     def _request(
@@ -77,16 +77,22 @@ class TiebaClient:
         url: str,
         method: str = "get",
         data: Optional[dict] = None,
-        retry: int = 3,
         headers: Optional[dict] = None,
+        retry: int = 3,
     ) -> Optional[dict]:
+        request_headers = dict(HEADERS)
+        if headers:
+            request_headers.update(headers)
+
         for i in range(retry):
             try:
-                if method.lower() == "get":
-                    resp = self.session.get(url, timeout=10, headers=headers)
-                else:
-                    resp = self.session.post(url, data=data, timeout=10, headers=headers)
-
+                resp = self.session.request(
+                    method.upper(),
+                    url,
+                    data=data,
+                    headers=request_headers,
+                    timeout=10,
+                )
                 resp.raise_for_status()
                 if not resp.text.strip():
                     raise ValueError("空响应")
@@ -100,56 +106,66 @@ class TiebaClient:
                 time.sleep(wait)
         return None
 
-    # -- 根据 fid 获取当前贴吧名 --
+    # -- 根据 fid 获取贴吧当前名称 --
     def get_current_forum_name(self, fid: str) -> Optional[str]:
-        """根据贴吧 fid 获取服务端当前名称，避免贴吧改名导致旧 kw 失效。"""
+        """通过贴吧 fid 获取当前名称，避免贴吧改名后仍使用历史名称。"""
         if not fid:
             return None
 
-        data = {
+        query = {
             "forum_id": str(fid),
             "subapp_type": "pc",
             "_client_type": "20",
         }
-        data["sign"] = self.signature(data, PC_SIGN_KEY)
-        params = {key: value for key, value in data.items() if key != "sign"}
-        params["sign"] = data["sign"]
-        url = f"{FORUM_CARD_URL}?{urlencode(params)}"
+        sign_source = "".join(f"{k}={query[k]}" for k in sorted(query))
+        query["sign"] = hashlib.md5(
+            (sign_source + PC_SIGN_KEY).encode()
+        ).hexdigest().upper()
+        url = f"{PC_FORUM_CARD_URL}?{urlencode(query)}"
 
         result = self._request(url)
         if result is None:
+            logger.warning(f"根据 fid={fid} 获取贴吧当前名称失败")
             return None
 
         forum = ((result.get("data") or {}).get("forum") or {})
-        name = forum.get("name")
-        return str(name).strip() if name else None
+        current_name = forum.get("name")
+        if isinstance(current_name, str) and current_name.strip():
+            return current_name.strip()
+
+        logger.warning(f"fid={fid} 的贴吧信息中没有当前名称")
+        return None
 
     # -- 新版客户端签到兜底 --
     def sign_forum_modern(self, fid: str, name: str, tbs: str) -> dict:
-        """针对旧客户端接口返回 340006 的贴吧，使用 fid 获取当前名称后重试。"""
-        current_name = self.get_current_forum_name(fid) or name
-        if current_name != name:
-            logger.info(f"贴吧改名检测：fid={fid}，名称由「{name}」更新为「{current_name}」")
-
+        """使用当前贴吧客户端接口重试签到。"""
         data = {
             "BDUSS": self.bduss,
-            "stoken": self.stoken or "",
             "fid": str(fid),
-            "kw": current_name,
+            "kw": name,
             "tbs": tbs,
             "from_widget": "1",
             "_client_type": "2",
             "_client_version": MODERN_CLIENT_VERSION,
+            "_phone_imei": "000000000000000000",
+            "model": "MI+5",
+            "net_type": "1",
         }
+        if self.stoken:
+            data["stoken"] = self.stoken
         data["sign"] = self.signature(data)
 
-        headers = {
-            "Content-Type": "application/x-www-form-urlencoded",
-            "Accept": "application/json, text/plain, */*",
-        }
-        result = self._request(MODERN_SIGN_URL, "post", data, headers=headers)
+        result = self._request(
+            MODERN_SIGN_URL,
+            "post",
+            data,
+            headers={
+                "Content-Type": "application/x-www-form-urlencoded",
+                "Accept": "application/json, text/plain, */*",
+            },
+        )
         if result is None:
-            return {"status": "error", "rank": None, "message": "新版客户端签到网络失败", "forum_name": current_name}
+            return {"status": "error", "rank": None, "message": "新版客户端签到网络失败"}
 
         error_code = str(result.get("error_code", ""))
         error_msg = result.get("error_msg", "")
@@ -167,15 +183,13 @@ class TiebaClient:
                 "status": "success",
                 "rank": rank,
                 "message": f"签到成功（新版客户端，经验+{bonus}）" if bonus is not None else "签到成功（新版客户端）",
-                "forum_name": current_name,
             }
         if error_code == "160002":
-            return {"status": "exist", "rank": None, "message": error_msg or "今日已签到", "forum_name": current_name}
+            return {"status": "exist", "rank": None, "message": error_msg or "今日已签到"}
         return {
             "status": "error",
             "rank": None,
             "message": error_msg or f"新版客户端错误 {error_code}",
-            "forum_name": current_name,
         }
 
     # -- 获取 tbs --
