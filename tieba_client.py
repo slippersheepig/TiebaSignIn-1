@@ -15,6 +15,7 @@ TBS_URL = "https://tieba.baidu.com/dc/common/tbs"
 LIKE_URL = "https://c.tieba.baidu.com/c/f/forum/like"
 SIGN_URL = "https://c.tieba.baidu.com/c/c/forum/sign"
 WEB_SIGN_URL = "https://tieba.baidu.com/sign/add"
+MOBILE_SIGN_URL = "https://tieba.baidu.com/mo/q/sign"
 
 HEADERS = {
     "User-Agent": (
@@ -52,9 +53,15 @@ class TiebaClient:
         if self._session is None:
             self._session = requests.Session()
             self._session.headers.update(HEADERS)
-            # 将 BDUSS 注入 Cookie，否则服务端收不到认证信息
+            # 将认证信息注入 Cookie，否则服务端收不到认证信息
+            cookies = {"BDUSS": self.bduss}
+            if self.stoken:
+                cookies["STOKEN"] = self.stoken
+            cookies["BAIDUID"] = hashlib.md5(
+                str(time.time_ns()).encode()
+            ).hexdigest().upper()
             requests.utils.add_dict_to_cookiejar(
-                self._session.cookies, {"BDUSS": self.bduss}
+                self._session.cookies, cookies
             )
         return self._session
 
@@ -187,49 +194,73 @@ class TiebaClient:
         else:
             return {"status": "error", "rank": None, "message": error_msg or "未知错误"}
 
-    # -- Web 端签到兜底（需要 STOKEN） --
-    def sign_forum_web(self, name: str, tbs: str) -> dict:
-        """客户端接口返回 340006 时，使用网页版接口再尝试一次。"""
+    # -- Web/WAP 端签到兜底 --
+    def sign_forum_web(self, fid: str, name: str, tbs: str) -> dict:
+        """客户端接口异常时，优先使用 WAP 签到接口，再回退到桌面端接口。"""
         if not self.stoken:
-            return {
-                "status": "error",
-                "rank": None,
-                "message": "缺少 STOKEN，无法使用 Web 端签到兜底",
-            }
+            logger.warning(f"〖{name}〗未配置 STOKEN，跳过 Web/WAP 兜底")
 
-        data = {
-            "ie": "utf-8",
-            "kw": name,
-            "tbs": tbs,
+        # WAP 签到接口比 /sign/add 对部分特殊贴吧兼容性更好；
+        # 关键是同时提供 fid、kw、tbs 和 is_like=1。
+        mobile_params = (
+            f"tbs={quote(str(tbs))}&"
+            f"kw={quote(str(name))}&"
+            "is_like=1&"
+            f"fid={quote(str(fid))}"
+        )
+        mobile_url = f"{MOBILE_SIGN_URL}?{mobile_params}"
+        mobile_headers = {
+            "Referer": f"https://tieba.baidu.com/f?kw={quote(name)}",
+            "User-Agent": (
+                "Mozilla/5.0 (Linux; Android 13; K) "
+                "AppleWebKit/537.36 (KHTML, like Gecko) "
+                "Chrome/120.0.0.0 Mobile Safari/537.36"
+            ),
         }
-        headers = {
-            "Referer": f"https://tieba.baidu.com/f?kw={quote(name)}&fr=home",
-            "X-Requested-With": "XMLHttpRequest",
-            "Cookie": f"BDUSS={self.bduss}; STOKEN={self.stoken}",
-        }
 
-        result = self._request(WEB_SIGN_URL, "post", data, headers=headers)
-        if result is None:
-            return {
-                "status": "error",
-                "rank": None,
-                "message": "Web 端签到请求失败",
+        result = self._request(mobile_url, "get", headers=mobile_headers)
+        if result is not None:
+            no = result.get("no")
+            error = result.get("error", "")
+            if no in (0, "0"):
+                return {"status": "success", "rank": None, "message": "签到成功（WAP 端）"}
+            if no in (1101, "1101", 160002, "160002"):
+                return {"status": "exist", "rank": None, "message": error or "今日已签到（WAP 端）"}
+            logger.warning(
+                f"〖{name}〗WAP 签到返回 no={no!r}, error={error!r}，继续尝试桌面端签到"
+            )
+
+        # WAP 失败时保留原来的 Web 接口作为最后兜底。
+        if self.stoken:
+            data = {
+                "ie": "utf-8",
+                "kw": name,
+                "tbs": tbs,
             }
-
-        no = result.get("no")
-        try:
-            no = int(no) if no is not None else -1
-        except (TypeError, ValueError):
-            no = -1
-
-        error = result.get("error", "")
-        if no == 0:
-            return {"status": "success", "rank": None, "message": "签到成功（Web 端）"}
-        if no == 1101:
-            return {"status": "exist", "rank": None, "message": error or "今日已签到（Web 端）"}
+            headers = {
+                "Referer": f"https://tieba.baidu.com/f?kw={quote(name)}&fr=home",
+                "X-Requested-With": "XMLHttpRequest",
+            }
+            result = self._request(WEB_SIGN_URL, "post", data, headers=headers)
+            if result is not None:
+                no = result.get("no")
+                try:
+                    no_int = int(no) if no is not None else -1
+                except (TypeError, ValueError):
+                    no_int = -1
+                error = result.get("error", "")
+                if no_int == 0:
+                    return {"status": "success", "rank": None, "message": "签到成功（Web 端）"}
+                if no_int == 1101:
+                    return {"status": "exist", "rank": None, "message": error or "今日已签到（Web 端）"}
+                return {
+                    "status": "error",
+                    "rank": None,
+                    "message": error or f"Web/WAP 签到失败，错误码 {no_int}",
+                }
 
         return {
             "status": "error",
             "rank": None,
-            "message": error or f"Web 端签到失败，错误码 {no}",
+            "message": "Web/WAP 签到请求失败",
         }
