@@ -60,14 +60,24 @@ def sign_round(
         fid, fname = forum.get("id", ""), forum.get("name", "")
         result = client.sign_forum(fid, fname, tbs)
 
-        # 旧客户端接口对极少数贴吧返回 340006；不要立即判定为被屏蔽，
-        # 使用当前客户端接口重试一次。
+        # 340006 对改名贴吧尤其常见：关注列表可能仍返回历史名称。
+        # 先根据 fid 查询当前名称，再用原客户端接口以新名称重试；
+        # 若仍失败，最后再使用新版客户端接口兜底。
         if result["status"] == "shield":
-            logger.info(f"〖{fname}〗旧客户端接口返回 340006，尝试新版客户端签到...")
+            logger.info(f"〖{fname}〗旧客户端接口返回 340006，检查贴吧当前名称...")
+            current_name = client.get_current_forum_name(fid)
+            if current_name and current_name != fname:
+                logger.info(f"贴吧名称已更新：{fname} → {current_name}")
+                fname = current_name
+                forum["name"] = current_name
+
             fresh_tbs = client.get_tbs() or tbs
             time.sleep(2)
-            result = client.sign_forum_modern(fid, fname, fresh_tbs)
-            fname = result.get("forum_name") or fname
+            result = client.sign_forum(fid, fname, fresh_tbs)
+
+            if result["status"] == "shield":
+                logger.info(f"〖{fname}〗更换当前名称后仍返回 340006，尝试新版客户端签到...")
+                result = client.sign_forum_modern(fid, fname, fresh_tbs)
 
         status = result["status"]
         stats[status] += 1
