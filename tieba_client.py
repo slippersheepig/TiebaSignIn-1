@@ -78,13 +78,14 @@ class TiebaClient:
         method: str = "get",
         data: Optional[dict] = None,
         retry: int = 3,
+        headers: Optional[dict] = None,
     ) -> Optional[dict]:
         for i in range(retry):
             try:
                 if method.lower() == "get":
-                    resp = self.session.get(url, timeout=10)
+                    resp = self.session.get(url, timeout=10, headers=headers)
                 else:
-                    resp = self.session.post(url, data=data, timeout=10)
+                    resp = self.session.post(url, data=data, timeout=10, headers=headers)
 
                 resp.raise_for_status()
                 if not resp.text.strip():
@@ -132,13 +133,14 @@ class TiebaClient:
 
         data = {
             "BDUSS": self.bduss,
-            "_client_version": MODERN_CLIENT_VERSION,
+            "stoken": self.stoken or "",
+            "fid": str(fid),
             "kw": current_name,
             "tbs": tbs,
             "from_widget": "1",
+            "_client_type": "2",
+            "_client_version": MODERN_CLIENT_VERSION,
         }
-        if self.stoken:
-            data["stoken"] = self.stoken
         data["sign"] = self.signature(data)
 
         headers = {
