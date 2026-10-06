@@ -3,7 +3,6 @@ import logging
 import random
 import time
 from typing import Optional
-from urllib.parse import quote
 
 import requests
 
@@ -14,8 +13,9 @@ SIGN_KEY = "tiebaclient!!!"
 TBS_URL = "https://tieba.baidu.com/dc/common/tbs"
 LIKE_URL = "https://c.tieba.baidu.com/c/f/forum/like"
 SIGN_URL = "https://c.tieba.baidu.com/c/c/forum/sign"
+MODERN_SIGN_URL = "https://tiebac.baidu.com/c/c/forum/sign"
+MODERN_CLIENT_VERSION = "12.64.1.1"
 WEB_SIGN_URL = "https://tieba.baidu.com/sign/add"
-MOBILE_SIGN_URL = "https://tieba.baidu.com/mo/q/sign"
 
 HEADERS = {
     "User-Agent": (
@@ -53,13 +53,10 @@ class TiebaClient:
         if self._session is None:
             self._session = requests.Session()
             self._session.headers.update(HEADERS)
-            # 将认证信息注入 Cookie，否则服务端收不到认证信息
+            # 将 BDUSS 注入 Cookie，否则服务端收不到认证信息
             cookies = {"BDUSS": self.bduss}
             if self.stoken:
                 cookies["STOKEN"] = self.stoken
-            cookies["BAIDUID"] = hashlib.md5(
-                str(time.time_ns()).encode()
-            ).hexdigest().upper()
             requests.utils.add_dict_to_cookiejar(
                 self._session.cookies, cookies
             )
@@ -77,15 +74,14 @@ class TiebaClient:
         url: str,
         method: str = "get",
         data: Optional[dict] = None,
-        headers: Optional[dict] = None,
         retry: int = 3,
     ) -> Optional[dict]:
         for i in range(retry):
             try:
                 if method.lower() == "get":
-                    resp = self.session.get(url, headers=headers, timeout=10)
+                    resp = self.session.get(url, timeout=10)
                 else:
-                    resp = self.session.post(url, data=data, headers=headers, timeout=10)
+                    resp = self.session.post(url, data=data, timeout=10)
 
                 resp.raise_for_status()
                 if not resp.text.strip():
@@ -99,6 +95,54 @@ class TiebaClient:
                 logger.warning(f"请求异常，{wait:.1f}s 后重试 ({i+1}/{retry}): {e}")
                 time.sleep(wait)
         return None
+
+    # -- 新版客户端签到兜底 --
+    def sign_forum_modern(self, name: str, tbs: str) -> dict:
+        """
+        针对旧客户端接口返回 340006 的贴吧，使用当前客户端接口重试。
+        当前可用实现使用 tiebac.baidu.com + 12.64.1.1，
+        请求参数仅保留 BDUSS、_client_version、kw、tbs。
+        """
+        data = {
+            "BDUSS": self.bduss,
+            "_client_version": MODERN_CLIENT_VERSION,
+            "kw": name,
+            "tbs": tbs,
+        }
+        data["sign"] = self.signature(data)
+
+        headers = {
+            "Content-Type": "application/x-www-form-urlencoded",
+            "Accept": "application/json, text/plain, */*",
+        }
+        result = self._request(MODERN_SIGN_URL, "post", data)
+        if result is None:
+            return {"status": "error", "rank": None, "message": "新版客户端签到网络失败"}
+
+        error_code = str(result.get("error_code", ""))
+        error_msg = result.get("error_msg", "")
+        if error_code == "0":
+            rank = None
+            user_info = result.get("user_info") or {}
+            rank_value = user_info.get("user_sign_rank")
+            if rank_value:
+                try:
+                    rank = int(rank_value)
+                except (TypeError, ValueError):
+                    rank = None
+            bonus = user_info.get("sign_bonus_point")
+            return {
+                "status": "success",
+                "rank": rank,
+                "message": f"签到成功（新版客户端，经验+{bonus}）" if bonus is not None else "签到成功（新版客户端）",
+            }
+        if error_code == "160002":
+            return {"status": "exist", "rank": None, "message": error_msg or "今日已签到"}
+        return {
+            "status": "error",
+            "rank": None,
+            "message": error_msg or f"新版客户端错误 {error_code}",
+        }
 
     # -- 获取 tbs --
     def get_tbs(self) -> Optional[str]:
@@ -193,74 +237,3 @@ class TiebaClient:
             return {"status": "shield", "rank": None, "message": "贴吧已被屏蔽"}
         else:
             return {"status": "error", "rank": None, "message": error_msg or "未知错误"}
-
-    # -- Web/WAP 端签到兜底 --
-    def sign_forum_web(self, fid: str, name: str, tbs: str) -> dict:
-        """客户端接口异常时，优先使用 WAP 签到接口，再回退到桌面端接口。"""
-        if not self.stoken:
-            logger.warning(f"〖{name}〗未配置 STOKEN，跳过 Web/WAP 兜底")
-
-        # WAP 签到接口比 /sign/add 对部分特殊贴吧兼容性更好；
-        # 关键是同时提供 fid、kw、tbs 和 is_like=1。
-        mobile_params = (
-            f"tbs={quote(str(tbs))}&"
-            f"kw={quote(str(name))}&"
-            "is_like=1&"
-            f"fid={quote(str(fid))}"
-        )
-        mobile_url = f"{MOBILE_SIGN_URL}?{mobile_params}"
-        mobile_headers = {
-            "Referer": f"https://tieba.baidu.com/f?kw={quote(name)}",
-            "User-Agent": (
-                "Mozilla/5.0 (Linux; Android 13; K) "
-                "AppleWebKit/537.36 (KHTML, like Gecko) "
-                "Chrome/120.0.0.0 Mobile Safari/537.36"
-            ),
-        }
-
-        result = self._request(mobile_url, "get", headers=mobile_headers)
-        if result is not None:
-            no = result.get("no")
-            error = result.get("error", "")
-            if no in (0, "0"):
-                return {"status": "success", "rank": None, "message": "签到成功（WAP 端）"}
-            if no in (1101, "1101", 160002, "160002"):
-                return {"status": "exist", "rank": None, "message": error or "今日已签到（WAP 端）"}
-            logger.warning(
-                f"〖{name}〗WAP 签到返回 no={no!r}, error={error!r}，继续尝试桌面端签到"
-            )
-
-        # WAP 失败时保留原来的 Web 接口作为最后兜底。
-        if self.stoken:
-            data = {
-                "ie": "utf-8",
-                "kw": name,
-                "tbs": tbs,
-            }
-            headers = {
-                "Referer": f"https://tieba.baidu.com/f?kw={quote(name)}&fr=home",
-                "X-Requested-With": "XMLHttpRequest",
-            }
-            result = self._request(WEB_SIGN_URL, "post", data, headers=headers)
-            if result is not None:
-                no = result.get("no")
-                try:
-                    no_int = int(no) if no is not None else -1
-                except (TypeError, ValueError):
-                    no_int = -1
-                error = result.get("error", "")
-                if no_int == 0:
-                    return {"status": "success", "rank": None, "message": "签到成功（Web 端）"}
-                if no_int == 1101:
-                    return {"status": "exist", "rank": None, "message": error or "今日已签到（Web 端）"}
-                return {
-                    "status": "error",
-                    "rank": None,
-                    "message": error or f"Web/WAP 签到失败，错误码 {no_int}",
-                }
-
-        return {
-            "status": "error",
-            "rank": None,
-            "message": "Web/WAP 签到请求失败",
-        }
