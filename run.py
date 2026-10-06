@@ -63,7 +63,7 @@ def sign_round(
         # 客户端接口对部分贴吧返回 340006，但网页版仍可正常签到时，使用 Web 端兜底。
         if result["status"] == "shield" and client.stoken:
             logger.info(f"〖{fname}〗客户端接口返回“被屏蔽”，尝试 Web 端签到...")
-            result = client.sign_forum_web(fname, tbs)
+            result = client.sign_forum_web(fid, fname, tbs)
 
         status = result["status"]
         stats[status] += 1
