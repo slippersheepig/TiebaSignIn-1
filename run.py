@@ -60,10 +60,13 @@ def sign_round(
         fid, fname = forum.get("id", ""), forum.get("name", "")
         result = client.sign_forum(fid, fname, tbs)
 
-        # 客户端接口对部分贴吧返回 340006，但网页版仍可正常签到时，使用 Web 端兜底。
-        if result["status"] == "shield" and client.stoken:
-            logger.info(f"〖{fname}〗客户端接口返回“被屏蔽”，尝试 Web 端签到...")
-            result = client.sign_forum_web(fid, fname, tbs)
+        # 旧客户端接口对极少数贴吧返回 340006；不要立即判定为被屏蔽，
+        # 使用当前客户端接口重试一次。
+        if result["status"] == "shield":
+            logger.info(f"〖{fname}〗旧客户端接口返回 340006，尝试新版客户端签到...")
+            fresh_tbs = client.get_tbs() or tbs
+            time.sleep(2)
+            result = client.sign_forum_modern(fname, fresh_tbs)
 
         status = result["status"]
         stats[status] += 1
