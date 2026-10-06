@@ -26,14 +26,15 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 
-def parse_args() -> str:
+def parse_args() -> tuple[str, str]:
     parser = argparse.ArgumentParser(description="百度贴吧自动签到")
     parser.add_argument("--bduss", default=None, help="贴吧 BDUSS Cookie 值（优先级高于环境变量）")
     args = parser.parse_args()
     bduss = args.bduss or os.environ.get("BDUSS", "")
+    stoken = os.environ.get("STOKEN", "")
     if not bduss:
         parser.error("请通过 --bduss 参数或 BDUSS 环境变量提供 BDUSS")
-    return bduss
+    return bduss, stoken
 
 
 def sign_round(
@@ -58,6 +59,12 @@ def sign_round(
 
         fid, fname = forum.get("id", ""), forum.get("name", "")
         result = client.sign_forum(fid, fname, tbs)
+
+        # 客户端接口对部分贴吧返回 340006，但网页版仍可正常签到时，使用 Web 端兜底。
+        if result["status"] == "shield" and client.stoken:
+            logger.info(f"〖{fname}〗客户端接口返回“被屏蔽”，尝试 Web 端签到...")
+            result = client.sign_forum_web(fname, tbs)
+
         status = result["status"]
         stats[status] += 1
 
@@ -92,8 +99,8 @@ def build_wechat_content(total: int, stats: dict) -> str:
 
 
 def main() -> None:
-    bduss = parse_args()
-    client = TiebaClient(bduss)
+    bduss, stoken = parse_args()
+    client = TiebaClient(bduss, stoken)
 
     # 1. 获取 tbs
     logger.info("正在获取 tbs...")
