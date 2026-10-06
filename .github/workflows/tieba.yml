@@ -24,6 +24,7 @@ jobs:
       - name: Run sign-in
         env:
           BDUSS: ${{ secrets.BDUSS }}
+          STOKEN: ${{ secrets.STOKEN }}
           WECHAT_WEBHOOK_KEY: ${{ secrets.WECHAT_WEBHOOK_KEY }}
         run: python run.py
 
@@ -34,4 +35,3 @@ jobs:
       actions: write
     steps:
       - uses: liskin/gh-workflow-keepalive@v1
-
