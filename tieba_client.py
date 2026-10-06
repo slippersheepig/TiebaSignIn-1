@@ -3,6 +3,7 @@ import logging
 import random
 import time
 from typing import Optional
+from urllib.parse import urlencode
 
 import requests
 
@@ -15,6 +16,8 @@ LIKE_URL = "https://c.tieba.baidu.com/c/f/forum/like"
 SIGN_URL = "https://c.tieba.baidu.com/c/c/forum/sign"
 MODERN_SIGN_URL = "https://tiebac.baidu.com/c/c/forum/sign"
 MODERN_CLIENT_VERSION = "12.64.1.1"
+PC_SIGN_KEY = "36770b1f34c9bbbf2e7d1a99d2b82fa9e"
+FORUM_CARD_URL = "https://tieba.baidu.com/c/f/pc/forumCard"
 WEB_SIGN_URL = "https://tieba.baidu.com/sign/add"
 
 HEADERS = {
@@ -64,9 +67,9 @@ class TiebaClient:
 
     # -- 签名算法 --
     @staticmethod
-    def signature(data: dict) -> str:
+    def signature(data: dict, salt: str = SIGN_KEY) -> str:
         s = "".join(f"{k}={data[k]}" for k in sorted(data))
-        return hashlib.md5((s + SIGN_KEY).encode()).hexdigest().upper()
+        return hashlib.md5((s + salt).encode()).hexdigest().upper()
 
     # -- 带指数退避的请求 --
     def _request(
@@ -96,28 +99,55 @@ class TiebaClient:
                 time.sleep(wait)
         return None
 
+    # -- 根据 fid 获取当前贴吧名 --
+    def get_current_forum_name(self, fid: str) -> Optional[str]:
+        """根据贴吧 fid 获取服务端当前名称，避免贴吧改名导致旧 kw 失效。"""
+        if not fid:
+            return None
+
+        data = {
+            "forum_id": str(fid),
+            "subapp_type": "pc",
+            "_client_type": "20",
+        }
+        data["sign"] = self.signature(data, PC_SIGN_KEY)
+        params = {key: value for key, value in data.items() if key != "sign"}
+        params["sign"] = data["sign"]
+        url = f"{FORUM_CARD_URL}?{urlencode(params)}"
+
+        result = self._request(url)
+        if result is None:
+            return None
+
+        forum = ((result.get("data") or {}).get("forum") or {})
+        name = forum.get("name")
+        return str(name).strip() if name else None
+
     # -- 新版客户端签到兜底 --
-    def sign_forum_modern(self, name: str, tbs: str) -> dict:
-        """
-        针对旧客户端接口返回 340006 的贴吧，使用当前客户端接口重试。
-        当前可用实现使用 tiebac.baidu.com + 12.64.1.1，
-        请求参数仅保留 BDUSS、_client_version、kw、tbs。
-        """
+    def sign_forum_modern(self, fid: str, name: str, tbs: str) -> dict:
+        """针对旧客户端接口返回 340006 的贴吧，使用 fid 获取当前名称后重试。"""
+        current_name = self.get_current_forum_name(fid) or name
+        if current_name != name:
+            logger.info(f"贴吧改名检测：fid={fid}，名称由「{name}」更新为「{current_name}」")
+
         data = {
             "BDUSS": self.bduss,
             "_client_version": MODERN_CLIENT_VERSION,
-            "kw": name,
+            "kw": current_name,
             "tbs": tbs,
+            "from_widget": "1",
         }
+        if self.stoken:
+            data["stoken"] = self.stoken
         data["sign"] = self.signature(data)
 
         headers = {
             "Content-Type": "application/x-www-form-urlencoded",
             "Accept": "application/json, text/plain, */*",
         }
-        result = self._request(MODERN_SIGN_URL, "post", data)
+        result = self._request(MODERN_SIGN_URL, "post", data, headers=headers)
         if result is None:
-            return {"status": "error", "rank": None, "message": "新版客户端签到网络失败"}
+            return {"status": "error", "rank": None, "message": "新版客户端签到网络失败", "forum_name": current_name}
 
         error_code = str(result.get("error_code", ""))
         error_msg = result.get("error_msg", "")
@@ -135,13 +165,15 @@ class TiebaClient:
                 "status": "success",
                 "rank": rank,
                 "message": f"签到成功（新版客户端，经验+{bonus}）" if bonus is not None else "签到成功（新版客户端）",
+                "forum_name": current_name,
             }
         if error_code == "160002":
-            return {"status": "exist", "rank": None, "message": error_msg or "今日已签到"}
+            return {"status": "exist", "rank": None, "message": error_msg or "今日已签到", "forum_name": current_name}
         return {
             "status": "error",
             "rank": None,
             "message": error_msg or f"新版客户端错误 {error_code}",
+            "forum_name": current_name,
         }
 
     # -- 获取 tbs --
