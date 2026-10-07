@@ -66,18 +66,33 @@ def sign_round(
         if result["status"] == "shield":
             logger.info(f"〖{fname}〗旧客户端接口返回 340006，检查贴吧当前名称...")
             current_name = client.get_current_forum_name(fid)
-            if current_name and current_name != fname:
+
+            if not current_name:
+                # 无法从网页端关注列表获取当前名称时，通常意味着该贴吧已被屏蔽、
+                # 已不存在于当前账号可见的关注列表，不能把新版接口的返回结果再归类为普通失败。
+                logger.warning(f"fid={fid} 无法获取当前名称，保留为“被屏蔽”状态")
+                result = {"status": "shield", "rank": None, "message": "贴吧已被屏蔽"}
+            elif current_name == fname:
+                # 当前名称没有变化，说明 340006 并非由改名导致，保留“被屏蔽”分类。
+                logger.warning(f"〖{fname}〗当前名称未发生变化，保留为“被屏蔽”状态")
+                result = {"status": "shield", "rank": None, "message": "贴吧已被屏蔽"}
+            else:
+                # 只有确认贴吧已经改名，才使用新名称重新签到。
                 logger.info(f"贴吧名称已更新：{fname} → {current_name}")
                 fname = current_name
                 forum["name"] = current_name
 
-            fresh_tbs = client.get_tbs() or tbs
-            time.sleep(2)
-            result = client.sign_forum(fid, fname, fresh_tbs)
+                fresh_tbs = client.get_tbs() or tbs
+                time.sleep(2)
+                result = client.sign_forum(fid, fname, fresh_tbs)
 
-            if result["status"] == "shield":
-                logger.info(f"〖{fname}〗更换当前名称后仍返回 340006，尝试新版客户端签到...")
-                result = client.sign_forum_modern(fid, fname, fresh_tbs)
+                if result["status"] == "shield":
+                    logger.info(f"〖{fname}〗更换当前名称后仍返回 340006，尝试新版客户端签到...")
+                    modern_result = client.sign_forum_modern(fid, fname, fresh_tbs)
+                    # 新版接口同样返回 340006 时，仍按“被屏蔽”处理；
+                    # 只有明确返回其他错误码，才归入“签到失败”。
+                    if modern_result["status"] != "error" or "340006" not in modern_result.get("message", ""):
+                        result = modern_result
 
         status = result["status"]
         stats[status] += 1
