@@ -108,32 +108,56 @@ class TiebaClient:
 
     # -- 根据 fid 获取贴吧当前名称 --
     def get_current_forum_name(self, fid: str) -> Optional[str]:
-        """通过贴吧 fid 获取当前名称，避免贴吧改名后仍使用历史名称。"""
+        """优先通过贴吧网页端关注列表获取贴吧当前名称。
+
+        移动客户端的 /c/f/forum/like 接口可能返回贴吧改名前的缓存名称，
+        网页端 /mo/q/newmoindex 返回的 like_forum 才是当前网页显示的名称。
+        """
         if not fid:
             return None
 
-        query = {
-            "forum_id": str(fid),
-            "subapp_type": "pc",
-            "_client_type": "20",
-        }
-        sign_source = "".join(f"{k}={query[k]}" for k in sorted(query))
-        query["sign"] = hashlib.md5(
-            (sign_source + PC_SIGN_KEY).encode()
-        ).hexdigest().upper()
-        url = f"{PC_FORUM_CARD_URL}?{urlencode(query)}"
+        target_fid = str(fid)
 
-        result = self._request(url)
-        if result is None:
-            logger.warning(f"根据 fid={fid} 获取贴吧当前名称失败")
-            return None
+        # 第一优先级：网页端关注列表。该接口返回
+        # data.like_forum[].forum_id / forum_name。
+        try:
+            result = self._request("https://tieba.baidu.com/mo/q/newmoindex")
+            if isinstance(result, dict):
+                like_forum = (result.get("data") or {}).get("like_forum") or []
+                if isinstance(like_forum, list):
+                    for forum in like_forum:
+                        if not isinstance(forum, dict):
+                            continue
+                        forum_id = forum.get("forum_id", forum.get("id", ""))
+                        current_name = forum.get("forum_name", forum.get("name", ""))
+                        if str(forum_id) == target_fid and isinstance(current_name, str):
+                            current_name = current_name.strip()
+                            if current_name:
+                                return current_name
+        except Exception as e:
+            logger.warning(f"通过网页端关注列表获取 fid={fid} 的当前名称失败: {e}")
 
-        forum = ((result.get("data") or {}).get("forum") or {})
-        current_name = forum.get("name")
-        if isinstance(current_name, str) and current_name.strip():
-            return current_name.strip()
+        # 第二优先级：PC forumCard，兼容部分账号/接口返回场景。
+        try:
+            query = {
+                "forum_id": target_fid,
+                "subapp_type": "pc",
+                "_client_type": "20",
+            }
+            sign_source = "".join(f"{k}={query[k]}" for k in sorted(query))
+            query["sign"] = hashlib.md5(
+                (sign_source + PC_SIGN_KEY).encode()
+            ).hexdigest().upper()
+            url = f"{PC_FORUM_CARD_URL}?{urlencode(query)}"
+            result = self._request(url)
+            forum = ((result or {}).get("data") or {}).get("forum") or {}
+            current_name = forum.get("name")
+            if isinstance(current_name, str) and current_name.strip():
+                return current_name.strip()
+        except Exception as e:
+            logger.warning(f"通过 PC forumCard 获取 fid={fid} 的当前名称失败: {e}")
 
-        logger.warning(f"fid={fid} 的贴吧信息中没有当前名称")
+        logger.warning(f"fid={fid} 的贴吧信息中仍无法取得当前名称")
         return None
 
     # -- 新版客户端签到兜底 --
